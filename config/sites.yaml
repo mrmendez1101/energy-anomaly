@@ -1,0 +1,19 @@
+window:
+  start: "2026-05-01"
+  end: "2026-05-30"
+
+sites:
+  - key: burgos_ph
+    label: "Burgos, Ilocos Norte PH"
+    lat: 18.52
+    lon: 120.65
+
+  - key: sevilla_es
+    label: "Sevilla, Spain"
+    lat: 37.39
+    lon: -5.99
+
+  - key: esbjerg_dk
+    label: "Esbjerg, Denmark"
+    lat: 55.47
+    lon: 8.45
