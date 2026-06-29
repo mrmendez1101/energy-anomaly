@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from energy_monitor.clean import DataQualitySummary
 from energy_monitor.store import ReadingsStore
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -54,3 +55,22 @@ def test_anomaly_columns_default_to_null() -> None:
     result = store._conn.execute("SELECT is_anomaly, anomaly_score FROM readings").fetchdf()
     assert bool(result["is_anomaly"].isna().all())
     assert bool(result["anomaly_score"].isna().all())
+
+
+def test_load_dq_persists_summary() -> None:
+    """load_dq creates a dq_summary table with one row per site."""
+    store = ReadingsStore(":memory:")
+    summaries = [
+        DataQualitySummary(
+            site_key="site_a", rows_in=100, nulls_filled=2, rows_dropped=1, rows_out=99
+        ),
+        DataQualitySummary(
+            site_key="site_b", rows_in=80, nulls_filled=0, rows_dropped=0, rows_out=80
+        ),
+    ]
+    store.load_dq(summaries)
+    result = store._conn.execute("SELECT * FROM dq_summary ORDER BY site_key").fetchdf()
+    assert len(result) == 2
+    assert list(result["site_key"]) == ["site_a", "site_b"]
+    rows_out: pd.Series = result.loc[result["site_key"] == "site_a", "rows_out"]  # type: ignore[assignment]
+    assert int(rows_out.iloc[0]) == 99

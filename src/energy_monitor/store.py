@@ -40,6 +40,15 @@ class ReadingsStore:
         """Return column names of the readings table."""
         return self._conn.execute("DESCRIBE readings").fetchdf()["column_name"].tolist()
 
+    def load_dq(self, summaries: list) -> None:
+        """Persist data-quality summaries as a dq_summary table."""
+        rows = [s.model_dump() for s in summaries]
+        df = pd.DataFrame(rows)
+        self._conn.execute("DROP TABLE IF EXISTS dq_summary")
+        self._conn.register("_dq_tmp", df)
+        self._conn.execute("CREATE TABLE dq_summary AS SELECT * FROM _dq_tmp")
+        self._conn.unregister("_dq_tmp")
+
     def export_parquet(self, path: Path) -> None:
         """Export the readings table to a Parquet file."""
         path.parent.mkdir(parents=True, exist_ok=True)
