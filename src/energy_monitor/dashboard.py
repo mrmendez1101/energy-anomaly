@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import plotly.graph_objects as go
-from dash import Dash, Input, Output, dcc, html
+from dash import Dash, Input, Output, State, dcc, html
 
+from energy_monitor.agent import AnalystAgent
 from energy_monitor.queries import ReadingsQuery
 
 _METRIC_LABELS: dict[str, str] = {
@@ -39,7 +42,69 @@ def _default_metric(metrics: list[str]) -> str | None:
     return measured[0] if measured else metrics[0]
 
 
-def _build_app(q: ReadingsQuery) -> Dash:
+def _answer_text(agent: Any, question: str | None) -> str:
+    """Pure callback body: blank input is a no-op, otherwise ask the agent.
+
+    Kept separate from the Dash callback so the branching logic is unit-testable
+    without spinning up the app. C# analogy: a thin service method behind a thin
+    controller action.
+    """
+    if not question or not question.strip():
+        return ""
+    try:
+        return agent.ask(question.strip())
+    except Exception as exc:  # UI boundary: the bonus must never crash the core tool
+        return f"Sorry, the agent could not answer that right now ({exc})."
+
+
+def _answer_outputs(agent: Any, question: str | None) -> tuple[str, str, bool, str]:
+    """Server-callback body: the answer plus the values that *clear* the waiting
+    indicator the clientside callback raised.
+
+    Returns (answer, status_text, ask_disabled, ask_label). Status is blanked and
+    the button restored/re-enabled once the answer lands. Kept as a pure helper so
+    the indicator-reset contract is unit-testable without a browser. C# analogy: a
+    DTO returned by the service method, assembled by the thin controller.
+    """
+    return _answer_text(agent, question), "", False, "Ask"
+
+
+def _chat_panel(enabled: bool) -> html.Div:
+    """The chat input, or a disabled notice when no agent is configured."""
+    if not enabled:
+        return html.Div(
+            "Agent disabled: set ANTHROPIC_API_KEY and restart to enable the chat.",
+            style={"color": "#888", "fontStyle": "italic"},
+        )
+    return html.Div([
+        dcc.Input(
+            id="chat-input",
+            type="text",
+            placeholder="e.g. Which site had the highest average solar radiation?",
+            debounce=True,
+            style={"width": "70%", "padding": "6px"},
+        ),
+        html.Button("Ask", id="chat-ask", n_clicks=0, style={"marginLeft": "8px"}),
+        # Waiting indicator: a clientside callback raises this the instant Ask is
+        # clicked; the server callback blanks it when the answer returns.
+        html.Div(
+            id="chat-status",
+            style={"marginTop": "0.5rem", "color": "#888", "fontStyle": "italic"},
+        ),
+        # dcc.Loading tracks chat-answer's loading state client-side and overlays a
+        # spinner while the (blocking) agent.ask() server callback runs.
+        dcc.Loading(
+            id="chat-loading",
+            type="dot",
+            children=html.Div(
+                id="chat-answer",
+                style={"marginTop": "0.75rem", "whiteSpace": "pre-wrap"},
+            ),
+        ),
+    ])
+
+
+def _build_app(q: ReadingsQuery, agent: Any | None = None) -> Dash:
     sites = q.list_sites()
     metrics = q.list_metrics()
     lo, hi = q.date_bounds()
@@ -97,6 +162,10 @@ def _build_app(q: ReadingsQuery) -> Dash:
             # ── Data Quality ──────────────────────────────────────────────────
             html.H3("Data Quality", style={"marginTop": "1.5rem"}),
             html.Div(id="dq-table"),
+
+            # ── Analyst chat (F6 bonus) ───────────────────────────────────────
+            html.H3("Ask the Analyst Agent", style={"marginTop": "1.5rem"}),
+            _chat_panel(agent is not None),
         ],
     )
 
@@ -183,11 +252,62 @@ def _build_app(q: ReadingsQuery) -> Dash:
             style={"borderCollapse": "collapse", "fontSize": "0.9rem"},
         )
 
+    # Only register the chat callbacks when an agent exists; otherwise the
+    # chat-input/chat-ask components are absent and the callbacks have nothing to bind.
+    if agent is not None:
+        # Instant, browser-side feedback the moment Ask is clicked: show "Analyzing…"
+        # and disable/relabel the button. A synchronous server callback cannot do this
+        # itself — the browser only re-renders when the call returns — so we raise the
+        # indicator clientside and let the server callback below clear it. Empty input
+        # is a no-op (no_update) so a blank click doesn't flash the indicator.
+        app.clientside_callback(
+            """
+            function(n_clicks, question) {
+                const noUpdate = window.dash_clientside.no_update;
+                if (!question || !question.trim()) {
+                    return [noUpdate, noUpdate, noUpdate];
+                }
+                return ['Analyzing…', true, 'Asking…'];
+            }
+            """,
+            Output("chat-status", "children"),
+            Output("chat-ask", "disabled"),
+            Output("chat-ask", "children"),
+            Input("chat-ask", "n_clicks"),
+            State("chat-input", "value"),
+            prevent_initial_call=True,
+        )
+
+        # Server callback: runs the (blocking) agent, then clears the indicator the
+        # clientside callback raised. chat-status/chat-ask.disabled/chat-ask.children
+        # are written by both callbacks, so the server side declares them
+        # allow_duplicate=True (Dash requires prevent_initial_call with it).
+        @app.callback(
+            Output("chat-answer", "children"),
+            Output("chat-status", "children", allow_duplicate=True),
+            Output("chat-ask", "disabled", allow_duplicate=True),
+            Output("chat-ask", "children", allow_duplicate=True),
+            Input("chat-ask", "n_clicks"),
+            State("chat-input", "value"),
+            prevent_initial_call=True,
+        )
+        def answer_question(_: int, question: str | None) -> tuple[str, str, bool, str]:
+            return _answer_outputs(agent, question)
+
     return app
+
+
+def _build_agent(q: ReadingsQuery) -> AnalystAgent | None:
+    """Construct the agent only if an API key is present, else degrade gracefully."""
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return None
+    return AnalystAgent(q)
 
 
 def run_dashboard(db_path: str | Path = "data/warehouse.duckdb") -> None:
     q = ReadingsQuery(db_path)
-    app = _build_app(q)
-    print("Dashboard running at http://127.0.0.1:8050/")
+    agent = _build_agent(q)
+    app = _build_app(q, agent=agent)
+    status = "enabled" if agent is not None else "disabled (no ANTHROPIC_API_KEY)"
+    print(f"Dashboard running at http://127.0.0.1:8050/  (agent {status})")
     app.run(debug=False)

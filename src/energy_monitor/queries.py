@@ -69,3 +69,61 @@ class ReadingsQuery:
 
     def dq_summary(self) -> pd.DataFrame:
         return self._conn.execute("SELECT * FROM dq_summary").fetchdf()
+
+    # ── F6 agent query methods ───────────────────────────────────────────────
+    # These back the agent's whitelisted tools. The metric and site values come
+    # from the model, so they are bound as ? parameters (never interpolated) so
+    # the agent cannot inject SQL. C# analogy: parameterised repository methods.
+
+    def avg_metric_by_site(
+        self, metric: str, start: str | date, end: str | date
+    ) -> pd.DataFrame:
+        """Average a metric per site over a window, ranked highest first."""
+        return self._conn.execute(
+            """
+            SELECT site_key, AVG(value) AS avg_value
+            FROM readings
+            WHERE metric = ?
+            AND ts_utc::DATE BETWEEN ? AND ?
+            GROUP BY site_key
+            ORDER BY avg_value DESC
+            """,
+            [metric, _validated_date(start, "start"), _validated_date(end, "end")],
+        ).fetchdf()
+
+    def anomalies_in_window(
+        self, site: str, metric: str, start: str | date, end: str | date
+    ) -> pd.DataFrame:
+        """Return the flagged anomaly rows for one site and metric in a window."""
+        return self._conn.execute(
+            """
+            SELECT * FROM readings
+            WHERE site_key = ?
+            AND metric = ?
+            AND is_anomaly = TRUE
+            AND ts_utc::DATE BETWEEN ? AND ?
+            ORDER BY ts_utc
+            """,
+            [site, metric, _validated_date(start, "start"), _validated_date(end, "end")],
+        ).fetchdf()
+
+    def compare_generation(self, start: str | date, end: str | date) -> pd.DataFrame:
+        """Average each site's solar_cf and wind_cf over a window, one row per site.
+
+        Uses DuckDB's AVG(...) FILTER to pivot the two capacity-factor metrics
+        into columns. These metrics are produced by F4b.
+        """
+        return self._conn.execute(
+            """
+            SELECT
+                site_key,
+                AVG(value) FILTER (WHERE metric = 'solar_cf') AS avg_solar_cf,
+                AVG(value) FILTER (WHERE metric = 'wind_cf') AS avg_wind_cf
+            FROM readings
+            WHERE metric IN ('solar_cf', 'wind_cf')
+            AND ts_utc::DATE BETWEEN ? AND ?
+            GROUP BY site_key
+            ORDER BY site_key
+            """,
+            [_validated_date(start, "start"), _validated_date(end, "end")],
+        ).fetchdf()

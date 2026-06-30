@@ -2,6 +2,7 @@ import argparse
 from pathlib import Path
 
 import pandas as pd
+from dotenv import load_dotenv
 
 from energy_monitor.anomaly import AnomalyDetector, IQRConfig
 from energy_monitor.clean import Cleaner
@@ -65,6 +66,9 @@ def run_pipeline() -> None:
 
 
 def main() -> None:
+    # Load ANTHROPIC_API_KEY (and any other secrets) from a gitignored .env file
+    # so the F6 agent enables without exporting env vars by hand each session.
+    load_dotenv()
     parser = argparse.ArgumentParser(prog="energy_monitor")
     parser.add_argument(
         "--dashboard",

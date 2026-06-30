@@ -46,6 +46,32 @@ def tmp_db(tmp_path: Path) -> Path:
              "solar_radiation", 450.0, "W/m2", False, 0.0),
             ("site_b", TS.format(h="12"), TS.format(h="12"),
              "wind_speed_10m", 5.0, "m/s", False, 0.0),
+            # Derived capacity-factor rows (F4b), needed by compare_generation.
+            # solar_cf: site_a avg 0.6, site_b avg 0.45; wind_cf: site_a 0.3, site_b 0.15.
+            ("site_a", TS.format(h="10"), TS.format(h="10"),
+             "solar_cf", 0.5, "ratio", False, 0.0),
+            ("site_a", TS.format(h="11"), TS.format(h="11"),
+             "solar_cf", 0.6, "ratio", False, 0.0),
+            ("site_a", TS.format(h="12"), TS.format(h="12"),
+             "solar_cf", 0.7, "ratio", False, 0.0),
+            ("site_a", TS.format(h="10"), TS.format(h="10"),
+             "wind_cf", 0.2, "ratio", False, 0.0),
+            ("site_a", TS.format(h="11"), TS.format(h="11"),
+             "wind_cf", 0.3, "ratio", False, 0.0),
+            ("site_a", TS.format(h="12"), TS.format(h="12"),
+             "wind_cf", 0.4, "ratio", False, 0.0),
+            ("site_b", TS.format(h="10"), TS.format(h="10"),
+             "solar_cf", 0.4, "ratio", False, 0.0),
+            ("site_b", TS.format(h="11"), TS.format(h="11"),
+             "solar_cf", 0.45, "ratio", False, 0.0),
+            ("site_b", TS.format(h="12"), TS.format(h="12"),
+             "solar_cf", 0.5, "ratio", False, 0.0),
+            ("site_b", TS.format(h="10"), TS.format(h="10"),
+             "wind_cf", 0.1, "ratio", False, 0.0),
+            ("site_b", TS.format(h="11"), TS.format(h="11"),
+             "wind_cf", 0.15, "ratio", False, 0.0),
+            ("site_b", TS.format(h="12"), TS.format(h="12"),
+             "wind_cf", 0.2, "ratio", False, 0.0),
         ],
     )
 
@@ -80,7 +106,9 @@ def test_list_sites_returns_all_sites(tmp_db: Path) -> None:
 
 def test_list_metrics_returns_all_metrics(tmp_db: Path) -> None:
     q = ReadingsQuery(tmp_db)
-    assert set(q.list_metrics()) == {"solar_radiation", "wind_speed_10m"}
+    assert set(q.list_metrics()) == {
+        "solar_radiation", "wind_speed_10m", "solar_cf", "wind_cf"
+    }
 
 
 def test_date_bounds_correct(tmp_db: Path) -> None:
@@ -129,3 +157,56 @@ def test_readings_raises_on_empty_date(tmp_db: Path) -> None:
     q = ReadingsQuery(tmp_db)
     with pytest.raises(ValueError, match="YYYY-MM-DD"):
         q.readings(["site_a"], ["solar_radiation"], "", "2026-05-01")
+
+
+# ── F6 agent query methods ──────────────────────────────────────────────────
+
+
+def test_avg_metric_by_site_ranks_descending(tmp_db: Path) -> None:
+    q = ReadingsQuery(tmp_db)
+    df = q.avg_metric_by_site("solar_radiation", "2026-05-01", "2026-05-01")
+    # site_a avg = (500+600+5000)/3 ≈ 2033.3, site_b avg = (400+450)/2 = 425.
+    assert list(df["site_key"]) == ["site_a", "site_b"]
+    avg_col: pd.Series = df["avg_value"]  # type: ignore[assignment]
+    assert round(float(avg_col.iloc[0]), 1) == 2033.3
+    assert float(avg_col.iloc[1]) == 425.0
+
+
+def test_avg_metric_by_site_binds_metric_safely(tmp_db: Path) -> None:
+    # A SQL-injection style metric string must bind as a literal, returning no rows.
+    q = ReadingsQuery(tmp_db)
+    df = q.avg_metric_by_site("'; DROP TABLE readings; --", "2026-05-01", "2026-05-01")
+    assert df.empty
+    # Table must still exist and be queryable afterwards.
+    assert set(q.list_sites()) == {"site_a", "site_b"}
+
+
+def test_anomalies_in_window_returns_only_flagged(tmp_db: Path) -> None:
+    q = ReadingsQuery(tmp_db)
+    df = q.anomalies_in_window("site_a", "solar_radiation", "2026-05-01", "2026-05-01")
+    assert len(df) == 1
+    value_col: pd.Series = df["value"]  # type: ignore[assignment]
+    assert float(value_col.iloc[0]) == 5000.0
+
+
+def test_anomalies_in_window_empty_when_none(tmp_db: Path) -> None:
+    q = ReadingsQuery(tmp_db)
+    df = q.anomalies_in_window("site_b", "solar_radiation", "2026-05-01", "2026-05-01")
+    assert df.empty
+
+
+def test_compare_generation_averages_capacity_factors(tmp_db: Path) -> None:
+    q = ReadingsQuery(tmp_db)
+    df = q.compare_generation("2026-05-01", "2026-05-01")
+    assert list(df["site_key"]) == ["site_a", "site_b"]
+    by_site = df.set_index("site_key")
+    assert round(float(by_site.loc["site_a", "avg_solar_cf"]), 2) == 0.60
+    assert round(float(by_site.loc["site_a", "avg_wind_cf"]), 2) == 0.30
+    assert round(float(by_site.loc["site_b", "avg_solar_cf"]), 2) == 0.45
+    assert round(float(by_site.loc["site_b", "avg_wind_cf"]), 2) == 0.15
+
+
+def test_compare_generation_empty_window_returns_empty(tmp_db: Path) -> None:
+    q = ReadingsQuery(tmp_db)
+    df = q.compare_generation("2025-01-01", "2025-01-02")
+    assert df.empty
